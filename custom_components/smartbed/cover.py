@@ -76,20 +76,20 @@ class SmartBedMotor(CoverEntity):
 
     def __init__(self, cover) -> None:
         """Initialize the cover device."""
-        self._name = cover[CONF_NAME]
+        self._name: str = cover[CONF_NAME]
         self._api: EspSmartBedApiClient = cover[CONF_API]
         self._motor_state: SmartBedMotorState = SmartBedMotorState(
             type=cover[CONF_MOTOR_TYPE], up="off", down="off"
         )
-        self._is_closed = True
-        self._opening_duration = 0  # seconds
-        self._closing_duration = 0
+        self._is_closed: bool | None = None
+        self._opening_duration: int = 0  # seconds
+        self._closing_duration: int = 0
         if self._motor_state.type == SmartBedMotorType.HEAD:
-            self._fully_opened_duration = 20
-            self._fully_closed_duration = 14
+            self._fully_opened_duration: int = 20
+            self._fully_closed_duration: int = 14
         elif self._motor_state.type == SmartBedMotorType.FOOT:
-            self._fully_opened_duration = 14
-            self._fully_closed_duration = 10
+            self._fully_opened_duration: int = 14
+            self._fully_closed_duration: int = 10
 
     @property
     def name(self) -> str:
@@ -97,7 +97,7 @@ class SmartBedMotor(CoverEntity):
         return self._name
 
     @property
-    def is_closed(self) -> bool:
+    def is_closed(self) -> bool | None:
         """Return if the cover is closed."""
         return self._is_closed
 
@@ -130,7 +130,7 @@ class SmartBedMotor(CoverEntity):
         new_state = SmartBedMotorState(type=self._motor_state.type, up="on", down="off")
         success = await self._api.async_set_motor_state(new_state)
         if success:
-            self._is_closed = False
+            # self._is_closed = False
             self._motor_state = new_state
 
     async def async_close_cover(self, **kwargs: Any) -> None:
