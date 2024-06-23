@@ -15,6 +15,7 @@ class EspSmartBedApiClient:
 
     SET_STATE_ENDPOINT = "set"
     STATUS_ENDPOINT = "status"
+    DEFAULT_TIMEOUT = 60
 
     def __init__(self, base_url: str, session: aiohttp.ClientSession) -> None:
         """Initialize the API by setting the base url."""
@@ -23,7 +24,7 @@ class EspSmartBedApiClient:
 
     async def async_test_connection(self) -> bool:
         """Test the connection to the base url."""
-        async with self._session.get(f"{self._base_url}/", timeout=600) as response:
+        async with self._session.get(f"{self._base_url}/", timeout=self.DEFAULT_TIMEOUT) as response:
             return response.status == 200
 
     async def async_set_motor_state(self, motor: SmartBedMotorState) -> bool | None:
@@ -34,14 +35,14 @@ class EspSmartBedApiClient:
         }
 
         async with self._session.get(
-            f"{self._base_url}/{self.SET_STATE_ENDPOINT}", params=params, timeout=600
+            f"{self._base_url}/{self.SET_STATE_ENDPOINT}", params=params, timeout=self.DEFAULT_TIMEOUT
         ) as response:
             return response.status == 200
 
     async def async_get_status(self) -> SmartBedState | None:
         """Get the current state of the SmartBed."""
         async with self._session.get(
-            f"{self._base_url}/{self.STATUS_ENDPOINT}", timeout=600
+            f"{self._base_url}/{self.STATUS_ENDPOINT}", timeout=self.DEFAULT_TIMEOUT
         ) as response:
             text = await response.text()
             return self._handle_response(response, text)
@@ -49,6 +50,10 @@ class EspSmartBedApiClient:
     def _handle_response(
         self, response: aiohttp.ClientResponse, text: str
     ) -> SmartBedState | None:
+        _LOGGER.debug(
+            "Sent GET request was: %s",
+            response.url,
+        )
         if response.status == 200:
             _LOGGER.debug(
                 "Response status code: %s | Response text: %s",
@@ -57,7 +62,7 @@ class EspSmartBedApiClient:
             )
             resp_json = json.loads(text)
             return SmartBedState(**resp_json)
-
+        
         _LOGGER.error(
             "Response status code: %s | Response text: %s",
             response.status,
