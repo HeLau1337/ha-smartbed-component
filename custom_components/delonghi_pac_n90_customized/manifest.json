@@ -1,0 +1,19 @@
+{
+    "domain": "smartbed",
+    "name": "SmartBed by HeLau1337",
+    "version": "0.1.0",
+    "codeowners": ["@HeLau1337"],
+    "config_flow": false,
+    "dhcp": [
+      {
+        "hostname": "esp-smartbed-controller*"
+      },
+      {
+        "registered_devices": true
+      }
+    ],
+    "documentation": "https://github.com/HeLau1337/ha-smartbed-component",
+    "iot_class": "local_polling",
+    "issue_tracker": "https://github.com/HeLau1337/ha-smartbed-component/issues"
+  }
+  

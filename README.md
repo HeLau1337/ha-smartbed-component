@@ -1,0 +1,2 @@
+# HomeAssistant integration for my "SmartBed"
+This HomeAssistant integration is very specific to my own needs. I built a ESP8266 controller that sends signals to the motor that moves the upper and lower parts of my bed. This controller has a REST API, also created by myself.
