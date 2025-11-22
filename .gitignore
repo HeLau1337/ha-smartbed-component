@@ -25,3 +25,11 @@ Icon
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local verification script
+verify_fix.py

@@ -97,6 +97,11 @@ class SmartBedMotor(CoverEntity):
         return self._name
 
     @property
+    def available(self) -> bool:
+        """Return if the entity is available."""
+        return self._api.is_connected()
+
+    @property
     def is_closed(self) -> bool | None:
         """Return if the cover is closed."""
         return self._is_closed
