@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
@@ -27,6 +28,7 @@ from .const import (
     CONF_DEFAULT_BASE_URL,
     CONF_DEFAULT_NAME,
     CONF_MOTOR_TYPE,
+    DOMAIN
 )
 from .esp_smartbed_api_client import EspSmartBedApiClient
 from .models import SmartBedMotorState, SmartBedMotorType, SmartBedState
@@ -77,6 +79,7 @@ class SmartBedMotor(CoverEntity):
     def __init__(self, cover) -> None:
         """Initialize the cover device."""
         self._name: str = cover[CONF_NAME]
+        self._base_url = cover[CONF_BASE_URL]
         self._api: EspSmartBedApiClient = cover[CONF_API]
         self._motor_state: SmartBedMotorState = SmartBedMotorState(
             type=cover[CONF_MOTOR_TYPE], up="off", down="off"
@@ -90,6 +93,24 @@ class SmartBedMotor(CoverEntity):
         elif self._motor_state.type == SmartBedMotorType.FOOT:
             self._fully_opened_duration: int = 14
             self._fully_closed_duration: int = 10
+
+    @property
+    def unique_id(self) -> str:
+        """Return the unique ID for this SmartBed motor."""
+        clean_url = self._base_url.replace("http://", "").replace("https://", "").strip("/")
+        return f"{DOMAIN}_{clean_url}_{self._motor_state.type.value}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Information about this entity/device."""
+        # Both motors must share the exact same identifier to be grouped into one physical device
+        base_name = self._name.replace(" Head Motor", "").replace(" Foot Motor", "")
+        return {
+            "identifiers": {(DOMAIN, self.unique_id)},
+            "name": base_name,
+            "model": "SmartBed ESP Controller",
+            "manufacturer": "Custom Build",
+        }
 
     @property
     def name(self) -> str:

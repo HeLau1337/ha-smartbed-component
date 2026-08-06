@@ -33,3 +33,5 @@ __pycache__/
 
 # Local verification script
 verify_fix.py
+
+.idea/
