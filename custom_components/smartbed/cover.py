@@ -13,13 +13,14 @@ from homeassistant.components.cover import (
     CoverEntity,
     CoverEntityFeature,
 )
-from homeassistant.const import CONF_NAME
+from homeassistant.const import CONF_NAME, STATE_CLOSED, STATE_OPEN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import (
@@ -68,10 +69,11 @@ def setup_platform(
     add_entities([SmartBedMotor(cover_h), SmartBedMotor(cover_f)])
 
 
-class SmartBedMotor(CoverEntity):
+class SmartBedMotor(CoverEntity, RestoreEntity):
     """Representation of SmartBed motor (head or foot)."""
 
-    _attr_device_class: CoverDeviceClass | None = CoverDeviceClass.GARAGE
+    _attr_assumed_state: bool = True
+    _attr_device_class: CoverDeviceClass | None = CoverDeviceClass.SHUTTER
     _attr_supported_features: CoverEntityFeature | None = (
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
     )
@@ -84,7 +86,7 @@ class SmartBedMotor(CoverEntity):
         self._motor_state: SmartBedMotorState = SmartBedMotorState(
             type=cover[CONF_MOTOR_TYPE], up="off", down="off"
         )
-        self._is_closed: bool | None = None
+        self._is_closed: bool = True
         self._opening_duration: int = 0  # seconds
         self._closing_duration: int = 0
         if self._motor_state.type == SmartBedMotorType.HEAD:
@@ -93,6 +95,13 @@ class SmartBedMotor(CoverEntity):
         elif self._motor_state.type == SmartBedMotorType.FOOT:
             self._fully_opened_duration: int = 14
             self._fully_closed_duration: int = 10
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last known state upon Home Assistant startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state in (STATE_OPEN, STATE_CLOSED):
+            self._is_closed = (last_state.state == STATE_CLOSED)
 
     @property
     def unique_id(self) -> str:
@@ -123,7 +132,7 @@ class SmartBedMotor(CoverEntity):
         return self._api.is_connected()
 
     @property
-    def is_closed(self) -> bool | None:
+    def is_closed(self) -> bool:
         """Return if the cover is closed."""
         return self._is_closed
 
@@ -151,20 +160,28 @@ class SmartBedMotor(CoverEntity):
                 self._motor_state.up = smart_bed_state.fu
                 self._motor_state.down = smart_bed_state.fd
 
+            if self._motor_state.down == "on":
+                self._is_closed = True
+            elif self._motor_state.up == "on":
+                self._is_closed = False
+
     async def async_open_cover(self, **kwargs: Any) -> None:
-        """Open the cover."""
+        """Open the cover (raise bed motor)."""
         new_state = SmartBedMotorState(type=self._motor_state.type, up="on", down="off")
         success = await self._api.async_set_motor_state(new_state)
         if success:
-            # self._is_closed = False
+            self._is_closed = False
             self._motor_state = new_state
+            self.async_write_ha_state()
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        """Close cover."""
+        """Close cover (lower bed motor to flat)."""
         new_state = SmartBedMotorState(type=self._motor_state.type, up="off", down="on")
         success = await self._api.async_set_motor_state(new_state)
         if success:
+            self._is_closed = True
             self._motor_state = new_state
+            self.async_write_ha_state()
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
@@ -174,3 +191,4 @@ class SmartBedMotor(CoverEntity):
         success = await self._api.async_set_motor_state(new_state)
         if success:
             self._motor_state = new_state
+            self.async_write_ha_state()
