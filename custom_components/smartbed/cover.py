@@ -72,6 +72,7 @@ def setup_platform(
 class SmartBedMotor(CoverEntity, RestoreEntity):
     """Representation of SmartBed motor (head or foot)."""
 
+    _attr_assumed_state: bool = True
     _attr_device_class: CoverDeviceClass | None = CoverDeviceClass.SHUTTER
     _attr_supported_features: CoverEntityFeature | None = (
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
