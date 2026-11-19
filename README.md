@@ -27,7 +27,7 @@ cover:
 | `platform` | string | **Yes** | — | Must be `smartbed`. |
 | `base_url` | string | **Yes** | `http://esp-smartbed-controller.local` | Base URL of the ESP8266 REST API. |
 | `name` | string | No | `SmartBed` | Friendly name prefix for the bed entities. |
-| `scan_interval` | integer | No | `30` | Polling interval in seconds to sync relay states. |
+| `scan_interval` | integer | No | `10` | Polling interval in seconds to sync relay states. |
 
 ---
 
