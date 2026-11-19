@@ -37,7 +37,7 @@ This project uses [`uv`](https://docs.astral.sh/uv/) for fast, reproducible Pyth
 
 ### 1. Prerequisites
 
-- Python 3.12 or newer
+- Python 3.14.2 or newer
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (recommended):
   ```bash
   # macOS / Linux
@@ -58,7 +58,7 @@ cd ha-smartbed-component
 uv sync
 ```
 
-This will automatically create a `.venv` directory with `homeassistant`, `pytest`, `pytest-homeassistant-custom-component`, and all required test tooling.
+This will automatically create a `.venv` directory with `homeassistant`, `pytest`, `pytest-homeassistant`, and all required test tooling.
 
 ### 3. Running Unit Tests
 
