@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 from pprint import pformat
 from typing import Any
@@ -13,8 +14,8 @@ from homeassistant.components.cover import (
     CoverEntity,
     CoverEntityFeature,
 )
-from homeassistant.const import CONF_NAME, STATE_CLOSED, STATE_OPEN
-from homeassistant.core import HomeAssistant
+from homeassistant.const import CONF_NAME, CONF_SCAN_INTERVAL, STATE_CLOSED, STATE_OPEN
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
@@ -22,19 +23,26 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+)
 
 from .const import (
     CONF_API,
     CONF_BASE_URL,
+    CONF_COORDINATOR,
     CONF_DEFAULT_BASE_URL,
     CONF_DEFAULT_NAME,
     CONF_MOTOR_TYPE,
-    DOMAIN
+    DOMAIN,
 )
 from .esp_smartbed_api_client import EspSmartBedApiClient
 from .models import SmartBedMotorState, SmartBedMotorType, SmartBedState
 
 _LOGGER = logging.getLogger(__name__)
+
+SCAN_INTERVAL = timedelta(seconds=10)
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -45,31 +53,47 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-def setup_platform(
+async def async_setup_platform(
     hass: HomeAssistant,
     config: ConfigType,
-    add_entities: AddEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up the cover platform."""
     _LOGGER.info(pformat(config))
 
+    api = EspSmartBedApiClient(
+        config[CONF_BASE_URL], async_get_clientsession(hass)
+    )
+    scan_interval: timedelta = config.get(CONF_SCAN_INTERVAL, SCAN_INTERVAL)
+    coordinator: DataUpdateCoordinator[SmartBedState | None] = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        config_entry=None,
+        name=config[CONF_NAME],
+        update_method=api.async_get_status,
+        update_interval=scan_interval,
+    )
+
     cover_h = {
         CONF_NAME: f"{config[CONF_NAME]} Head Motor",
         CONF_BASE_URL: config[CONF_BASE_URL],
-        CONF_API: EspSmartBedApiClient(
-            config[CONF_BASE_URL], async_get_clientsession(hass)
-        ),
+        CONF_API: api,
+        CONF_COORDINATOR: coordinator,
         CONF_MOTOR_TYPE: SmartBedMotorType.HEAD,
     }
     cover_f = cover_h.copy()
     cover_f[CONF_NAME] = f"{config[CONF_NAME]} Foot Motor"
     cover_f[CONF_MOTOR_TYPE] = SmartBedMotorType.FOOT
 
-    add_entities([SmartBedMotor(cover_h), SmartBedMotor(cover_f)])
+    async_add_entities([SmartBedMotor(cover_h), SmartBedMotor(cover_f)])
 
 
-class SmartBedMotor(CoverEntity, RestoreEntity):
+class SmartBedMotor(
+    CoordinatorEntity[DataUpdateCoordinator[SmartBedState | None]],
+    CoverEntity,
+    RestoreEntity,
+):
     """Representation of SmartBed motor (head or foot)."""
 
     _attr_assumed_state: bool = True
@@ -78,8 +102,9 @@ class SmartBedMotor(CoverEntity, RestoreEntity):
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
     )
 
-    def __init__(self, cover) -> None:
+    def __init__(self, cover: dict[str, Any]) -> None:
         """Initialize the cover device."""
+        super().__init__(cover[CONF_COORDINATOR])
         self._name: str = cover[CONF_NAME]
         self._base_url = cover[CONF_BASE_URL]
         self._api: EspSmartBedApiClient = cover[CONF_API]
@@ -102,24 +127,34 @@ class SmartBedMotor(CoverEntity, RestoreEntity):
         last_state = await self.async_get_last_state()
         if last_state and last_state.state in (STATE_OPEN, STATE_CLOSED):
             self._is_closed = (last_state.state == STATE_CLOSED)
+        if self.coordinator.data is not None:
+            self._update_from_coordinator_data(self.coordinator.data)
+
+    @property
+    def _clean_url(self) -> str:
+        """Return the base URL without scheme or trailing slash."""
+        return (
+            self._base_url.replace("http://", "")
+            .replace("https://", "")
+            .strip("/")
+        )
 
     @property
     def unique_id(self) -> str:
         """Return the unique ID for this SmartBed motor."""
-        clean_url = self._base_url.replace("http://", "").replace("https://", "").strip("/")
-        return f"{DOMAIN}_{clean_url}_{self._motor_state.type.value}"
+        return f"{DOMAIN}_{self._clean_url}_{self._motor_state.type.value}"
 
     @property
     def device_info(self) -> DeviceInfo:
         """Information about this entity/device."""
         # Both motors must share the exact same identifier to be grouped into one physical device
         base_name = self._name.replace(" Head Motor", "").replace(" Foot Motor", "")
-        return {
-            "identifiers": {(DOMAIN, self.unique_id)},
-            "name": base_name,
-            "model": "SmartBed ESP Controller",
-            "manufacturer": "Custom Build",
-        }
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._clean_url)},
+            name=base_name,
+            model="SmartBed ESP Controller",
+            manufacturer="Custom Build",
+        )
 
     @property
     def name(self) -> str:
@@ -129,7 +164,7 @@ class SmartBedMotor(CoverEntity, RestoreEntity):
     @property
     def available(self) -> bool:
         """Return if the entity is available."""
-        return self._api.is_connected()
+        return super().available and self._api.is_connected()
 
     @property
     def is_closed(self) -> bool:
@@ -146,12 +181,10 @@ class SmartBedMotor(CoverEntity, RestoreEntity):
         """Return if the cover is opening."""
         return self._motor_state.up == "on"
 
-    async def async_update(self) -> None:
-        """Fetch new state data for the cover.
-
-        This is the only method that should fetch new data for Home Assistant.
-        """
-        smart_bed_state: SmartBedState | None = await self._api.async_get_status()
+    def _update_from_coordinator_data(
+        self, smart_bed_state: SmartBedState | None
+    ) -> None:
+        """Update internal motor state from coordinator data."""
         if smart_bed_state:
             if self._motor_state.type == SmartBedMotorType.HEAD:
                 self._motor_state.up = smart_bed_state.hu
@@ -164,6 +197,12 @@ class SmartBedMotor(CoverEntity, RestoreEntity):
                 self._is_closed = True
             elif self._motor_state.up == "on":
                 self._is_closed = False
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._update_from_coordinator_data(self.coordinator.data)
+        self.async_write_ha_state()
 
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover (raise bed motor)."""

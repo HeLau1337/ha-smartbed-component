@@ -4,6 +4,7 @@ DOMAIN = "smartbed"
 
 CONF_BASE_URL = "base_url"
 CONF_API = "api"
+CONF_COORDINATOR = "coordinator"
 CONF_MOTOR_TYPE = "motor_type"
 
 CONF_DEFAULT_NAME = "SmartBed"

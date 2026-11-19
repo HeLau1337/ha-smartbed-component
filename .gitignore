@@ -30,8 +30,13 @@ Temporary Items
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.venv/
 
-# Local verification script
-verify_fix.py
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
 
 .idea/
