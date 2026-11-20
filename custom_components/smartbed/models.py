@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Literal
 
 type OnOff = Literal["on", "off"]
+VALID_ON_OFF: tuple[OnOff, OnOff] = ("on", "off")
 
 
 class SmartBedMotorType(Enum):
@@ -33,3 +34,13 @@ class SmartBedState:
     hd: OnOff
     fu: OnOff
     fd: OnOff
+
+    def __post_init__(self) -> None:
+        """Validate that every relay channel is strictly 'on' or 'off'."""
+        for field_name in ("hu", "hd", "fu", "fd"):
+            value = getattr(self, field_name)
+            if value not in VALID_ON_OFF:
+                raise ValueError(
+                    f"Invalid SmartBedState value for {field_name!r}: {value!r} "
+                    "(expected 'on' or 'off')"
+                )
