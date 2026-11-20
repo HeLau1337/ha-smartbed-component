@@ -204,30 +204,29 @@ class SmartBedMotor(
         self._update_from_coordinator_data(self.coordinator.data)
         self.async_write_ha_state()
 
+    async def _async_apply_motor_state(self, new_state: SmartBedMotorState) -> None:
+        """Send a motor command and propagate the resulting state via the coordinator."""
+        result_state = await self._api.async_set_motor_state(new_state)
+        if result_state is None:
+            if not self._api.is_connected():
+                self.coordinator.async_update_listeners()
+            return
+
+        self.coordinator.async_set_updated_data(result_state)
+
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover (raise bed motor)."""
         new_state = SmartBedMotorState(type=self._motor_state.type, up="on", down="off")
-        success = await self._api.async_set_motor_state(new_state)
-        if success:
-            self._is_closed = False
-            self._motor_state = new_state
-            self.async_write_ha_state()
+        await self._async_apply_motor_state(new_state)
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close cover (lower bed motor to flat)."""
         new_state = SmartBedMotorState(type=self._motor_state.type, up="off", down="on")
-        success = await self._api.async_set_motor_state(new_state)
-        if success:
-            self._is_closed = True
-            self._motor_state = new_state
-            self.async_write_ha_state()
+        await self._async_apply_motor_state(new_state)
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
         new_state = SmartBedMotorState(
             type=self._motor_state.type, up="off", down="off"
         )
-        success = await self._api.async_set_motor_state(new_state)
-        if success:
-            self._motor_state = new_state
-            self.async_write_ha_state()
+        await self._async_apply_motor_state(new_state)

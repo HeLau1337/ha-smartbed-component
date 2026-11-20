@@ -30,7 +30,11 @@ from custom_components.smartbed.cover import (
     SmartBedMotor,
     async_setup_platform,
 )
-from custom_components.smartbed.models import SmartBedMotorType, SmartBedState
+from custom_components.smartbed.models import (
+    SmartBedMotorState,
+    SmartBedMotorType,
+    SmartBedState,
+)
 
 
 def create_motor(
@@ -57,6 +61,28 @@ def create_motor(
         CONF_MOTOR_TYPE: motor_type,
     }
     return SmartBedMotor(config)
+
+
+def create_coordinator_and_motors(
+    hass,
+    mock_api: MagicMock,
+) -> tuple[DataUpdateCoordinator[SmartBedState | None], SmartBedMotor, SmartBedMotor]:
+    """Create a real DataUpdateCoordinator with Head and Foot motors ready for HA setup."""
+    coordinator: DataUpdateCoordinator[SmartBedState | None] = DataUpdateCoordinator(
+        hass,
+        logging.getLogger(__name__),
+        config_entry=None,
+        name="SmartBed",
+        update_method=mock_api.async_get_status,
+        update_interval=SCAN_INTERVAL,
+    )
+    head_motor = create_motor(SmartBedMotorType.HEAD, mock_api, coordinator)
+    foot_motor = create_motor(SmartBedMotorType.FOOT, mock_api, coordinator)
+    for motor in (head_motor, foot_motor):
+        motor.hass = hass
+        motor.async_write_ha_state = MagicMock()
+        motor.async_get_last_state = AsyncMock(return_value=None)
+    return coordinator, head_motor, foot_motor
 
 
 def test_motor_initial_state():
@@ -126,54 +152,169 @@ async def test_motor_state_restoration():
     assert motor.is_closed is True
 
 
-async def test_motor_open_action():
-    """Test async_open_cover transitions state and calls API."""
+async def test_motor_open_action(hass):
+    """Test async_open_cover calls API and syncs both motors via coordinator."""
     mock_api = MagicMock()
-    mock_api.async_set_motor_state = AsyncMock(return_value=True)
-    motor = create_motor(SmartBedMotorType.HEAD, mock_api)
-    motor.async_write_ha_state = MagicMock()
+    mock_api.is_connected.return_value = True
+    response_state = SmartBedState(hu="on", hd="off", fu="off", fd="off")
+    mock_api.async_set_motor_state = AsyncMock(return_value=response_state)
 
-    await motor.async_open_cover()
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
+    try:
+        await head_motor.async_added_to_hass()
+        await foot_motor.async_added_to_hass()
+        head_motor.async_write_ha_state.reset_mock()
+        foot_motor.async_write_ha_state.reset_mock()
 
-    assert motor.is_closed is False
-    assert motor.is_opening is True
-    assert motor.is_closing is False
-    assert motor.async_write_ha_state.called
-    assert mock_api.async_set_motor_state.called
+        await head_motor.async_open_cover()
+
+        mock_api.async_set_motor_state.assert_awaited_once_with(
+            SmartBedMotorState(type=SmartBedMotorType.HEAD, up="on", down="off")
+        )
+        assert coordinator.data == response_state
+        assert head_motor.is_closed is False
+        assert head_motor.is_opening is True
+        assert head_motor.is_closing is False
+        assert foot_motor.is_closed is True
+        assert foot_motor.is_opening is False
+        assert head_motor.async_write_ha_state.called
+        assert foot_motor.async_write_ha_state.called
+    finally:
+        await coordinator.async_shutdown()
 
 
-async def test_motor_close_action():
-    """Test async_close_cover transitions state and calls API."""
+async def test_motor_close_action(hass):
+    """Test async_close_cover calls API and syncs state via coordinator."""
     mock_api = MagicMock()
-    mock_api.async_set_motor_state = AsyncMock(return_value=True)
-    motor = create_motor(SmartBedMotorType.HEAD, mock_api)
-    motor.async_write_ha_state = MagicMock()
+    mock_api.is_connected.return_value = True
+    response_state = SmartBedState(hu="off", hd="on", fu="off", fd="off")
+    mock_api.async_set_motor_state = AsyncMock(return_value=response_state)
 
-    # Pre-set open
-    motor._is_closed = False
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
+    try:
+        await head_motor.async_added_to_hass()
+        await foot_motor.async_added_to_hass()
+        head_motor._is_closed = False
+        head_motor.async_write_ha_state.reset_mock()
+        foot_motor.async_write_ha_state.reset_mock()
 
-    await motor.async_close_cover()
+        await head_motor.async_close_cover()
 
-    assert motor.is_closed is True
-    assert motor.is_closing is True
-    assert motor.is_opening is False
-    assert motor.async_write_ha_state.called
-    assert mock_api.async_set_motor_state.called
+        mock_api.async_set_motor_state.assert_awaited_once_with(
+            SmartBedMotorState(type=SmartBedMotorType.HEAD, up="off", down="on")
+        )
+        assert head_motor.is_closed is True
+        assert head_motor.is_closing is True
+        assert head_motor.is_opening is False
+        assert head_motor.async_write_ha_state.called
+        assert foot_motor.async_write_ha_state.called
+    finally:
+        await coordinator.async_shutdown()
 
 
-async def test_motor_stop_action():
-    """Test async_stop_cover turns off relays and notifies HA."""
+async def test_motor_stop_action(hass):
+    """Test async_stop_cover stops only the target motor and preserves other axis state."""
     mock_api = MagicMock()
-    mock_api.async_set_motor_state = AsyncMock(return_value=True)
-    motor = create_motor(SmartBedMotorType.HEAD, mock_api)
-    motor.async_write_ha_state = MagicMock()
+    mock_api.is_connected.return_value = True
+    response_state = SmartBedState(hu="off", hd="off", fu="on", fd="off")
+    mock_api.async_set_motor_state = AsyncMock(return_value=response_state)
 
-    await motor.async_stop_cover()
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
+    try:
+        await head_motor.async_added_to_hass()
+        await foot_motor.async_added_to_hass()
+        head_motor._is_closed = False
+        head_motor._motor_state.up = "on"
+        head_motor.async_write_ha_state.reset_mock()
+        foot_motor.async_write_ha_state.reset_mock()
 
-    assert motor.is_opening is False
-    assert motor.is_closing is False
-    assert motor.async_write_ha_state.called
-    assert mock_api.async_set_motor_state.called
+        await head_motor.async_stop_cover()
+
+        mock_api.async_set_motor_state.assert_awaited_once_with(
+            SmartBedMotorState(type=SmartBedMotorType.HEAD, up="off", down="off")
+        )
+        assert head_motor.is_opening is False
+        assert head_motor.is_closing is False
+        assert head_motor.is_closed is False
+        assert foot_motor.is_opening is True
+        assert foot_motor.is_closed is False
+        assert head_motor.async_write_ha_state.called
+        assert foot_motor.async_write_ha_state.called
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_motor_command_reflects_wired_remote_override(hass):
+    """Test cover reflects authoritative ESP state when wired remote overrides a web command."""
+    mock_api = MagicMock()
+    mock_api.is_connected.return_value = True
+    override_state = SmartBedState(hu="off", hd="on", fu="off", fd="off")
+    mock_api.async_set_motor_state = AsyncMock(return_value=override_state)
+
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
+    try:
+        await head_motor.async_added_to_hass()
+        await foot_motor.async_added_to_hass()
+
+        await head_motor.async_open_cover()
+
+        assert head_motor.is_opening is False
+        assert head_motor.is_closing is True
+        assert head_motor.is_closed is True
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_motor_command_malformed_response_keeps_state(hass):
+    """Test malformed /set response (None while connected) preserves previous state."""
+    mock_api = MagicMock()
+    mock_api.is_connected.return_value = True
+    mock_api.async_set_motor_state = AsyncMock(return_value=None)
+
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
+    try:
+        await head_motor.async_added_to_hass()
+        await foot_motor.async_added_to_hass()
+        head_motor._is_closed = False
+        head_motor.async_write_ha_state.reset_mock()
+        foot_motor.async_write_ha_state.reset_mock()
+
+        await head_motor.async_close_cover()
+
+        assert head_motor.is_closed is False
+        assert head_motor.is_closing is False
+        assert head_motor.available is True
+        assert foot_motor.available is True
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_motor_command_connection_drop_marks_both_unavailable(hass):
+    """Test connection drop during a cover command marks both entities unavailable immediately."""
+    mock_api = MagicMock()
+    mock_api.is_connected.return_value = True
+
+    async def _disconnect_on_command(_motor_state):
+        mock_api.is_connected.return_value = False
+        return None
+
+    mock_api.async_set_motor_state = AsyncMock(side_effect=_disconnect_on_command)
+
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
+    try:
+        await head_motor.async_added_to_hass()
+        await foot_motor.async_added_to_hass()
+        head_motor.async_write_ha_state.reset_mock()
+        foot_motor.async_write_ha_state.reset_mock()
+
+        await head_motor.async_open_cover()
+
+        assert head_motor.available is False
+        assert foot_motor.available is False
+        assert head_motor.async_write_ha_state.called
+        assert foot_motor.async_write_ha_state.called
+    finally:
+        await coordinator.async_shutdown()
 
 
 async def test_motor_polling_update_head_and_foot(hass):
@@ -184,21 +325,7 @@ async def test_motor_polling_update_head_and_foot(hass):
         return_value=SmartBedState(hu="on", hd="off", fu="off", fd="on")
     )
 
-    coordinator = DataUpdateCoordinator(
-        hass,
-        logging.getLogger(__name__),
-        config_entry=None,
-        name="SmartBed",
-        update_method=mock_api.async_get_status,
-        update_interval=SCAN_INTERVAL,
-    )
-
-    head_motor = create_motor(SmartBedMotorType.HEAD, mock_api, coordinator)
-    foot_motor = create_motor(SmartBedMotorType.FOOT, mock_api, coordinator)
-    for motor in (head_motor, foot_motor):
-        motor.hass = hass
-        motor.async_write_ha_state = MagicMock()
-        motor.async_get_last_state = AsyncMock(return_value=None)
+    coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
 
     try:
         await head_motor.async_added_to_hass()
