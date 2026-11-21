@@ -1,10 +1,23 @@
 # Home Assistant Integration for SmartBed
 
-This Home Assistant custom component integrates a DIY motorized adjustable bed powered by an ESP8266 controller. The ESP controller exposes a REST API that operates the relays for raising and lowering the head and foot sections of the bed.
+This Home Assistant custom component integrates a DIY motorized adjustable bed powered by an ESP8266 controller ([`esp-smartbed-controller`](https://github.com/HeLau1337/esp-smartbed-controller)). The integration requires firmware `v2.0.0` or newer (unified `GET /status` schema) and polls a single endpoint per `scan_interval` via a shared `DataUpdateCoordinator`.
 
-The integration exposes two `cover` entities in Home Assistant:
+The integration exposes two `cover` entities and five diagnostic `sensor` entities grouped under a single Home Assistant device:
+
+### Cover Entities
 - `cover.<configured_name>_head_motor`
 - `cover.<configured_name>_foot_motor`
+
+Each cover exposes runtime state attributes from the ESP8266:
+- `source`: `"web"` | `"remote"` | `"none"`
+- `remaining_ms`: Remaining safety auto-shutoff duration in milliseconds (`0` when stopped)
+
+### Diagnostic Sensors (`EntityCategory.DIAGNOSTIC`)
+- `sensor.<configured_name>_wi_fi_rssi`: Wi-Fi signal strength (`dBm`)
+- `sensor.<configured_name>_last_boot`: Estimated boot timestamp (`TIMESTAMP`, stabilized with a ±5 s jitter deadband)
+- `sensor.<configured_name>_free_heap`: Free ESP8266 heap memory (`B`)
+- `sensor.<configured_name>_firmware_version`: Firmware version (attributes: `build`, `max_run_duration_ms`)
+- `sensor.<configured_name>_ip_address`: Device IPv4 address (attribute: `hostname`)
 
 ---
 

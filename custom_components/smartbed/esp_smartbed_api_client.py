@@ -111,11 +111,7 @@ class EspSmartBedApiClient:
             )
             try:
                 resp_json = json.loads(text)
-                if not isinstance(resp_json, dict):
-                    raise TypeError(
-                        f"Expected JSON object, got {type(resp_json).__name__}"
-                    )
-                return SmartBedState(**resp_json)
+                return SmartBedState.from_dict(resp_json)
             except (json.JSONDecodeError, TypeError, ValueError) as err:
                 preview = (
                     text

@@ -1,6 +1,8 @@
 """Tests for EspSmartBedApiClient."""
 
+import json
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -8,10 +10,48 @@ import pytest
 
 from custom_components.smartbed.esp_smartbed_api_client import EspSmartBedApiClient
 from custom_components.smartbed.models import (
+    SmartBedAxisState,
     SmartBedMotorState,
     SmartBedMotorType,
     SmartBedState,
 )
+
+
+def _make_status_dict(**overrides: Any) -> dict[str, Any]:
+    """Create a valid unified /status JSON dict with optional overrides."""
+    payload: dict[str, Any] = {
+        "hostname": "esp-smartbed-controller",
+        "version": "2.0.0",
+        "build": "Nov 20 2026 22:00:00",
+        "wifiConnected": True,
+        "ip": "192.168.178.51",
+        "rssi": -62,
+        "uptimeMs": 123456,
+        "freeHeap": 44800,
+        "maxRunDurationMs": 30000,
+        "head": {
+            "direction": "stopped",
+            "source": "none",
+            "remainingMs": 0,
+        },
+        "foot": {
+            "direction": "stopped",
+            "source": "none",
+            "remainingMs": 0,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _make_status_json(**overrides: Any) -> str:
+    """Serialize a unified /status JSON dict."""
+    return json.dumps(_make_status_dict(**overrides))
+
+
+def _make_expected_state(**overrides: Any) -> SmartBedState:
+    """Build the SmartBedState matching _make_status_dict(**overrides)."""
+    return SmartBedState.from_dict(_make_status_dict(**overrides))
 
 
 def _make_mock_get(
@@ -44,13 +84,13 @@ async def test_base_url_trailing_slash_normalized(mock_session):
     """Test that trailing slashes on base_url do not produce double slashes."""
     mock_session.get.return_value = _make_mock_get(
         url="http://192.168.1.100/status",
-        text='{"hu": "off", "hd": "off", "fu": "off", "fd": "off"}',
+        text=_make_status_json(),
     )
 
     client = EspSmartBedApiClient("http://192.168.1.100/", mock_session)
     status = await client.async_get_status()
 
-    assert status == SmartBedState(hu="off", hd="off", fu="off", fd="off")
+    assert status == _make_expected_state()
     mock_session.get.assert_called_with(
         "http://192.168.1.100/status",
         params=None,
@@ -72,9 +112,7 @@ async def test_base_url_trailing_slash_normalized(mock_session):
 async def test_custom_timeout_override(mock_session):
     """Test that a custom ClientTimeout passed to __init__ overrides DEFAULT_TIMEOUT."""
     custom_timeout = aiohttp.ClientTimeout(total=2)
-    mock_session.get.return_value = _make_mock_get(
-        text='{"hu": "off", "hd": "off", "fu": "off", "fd": "off"}',
-    )
+    mock_session.get.return_value = _make_mock_get(text=_make_status_json())
 
     client = EspSmartBedApiClient(
         "http://192.168.1.100", mock_session, timeout=custom_timeout
@@ -89,20 +127,44 @@ async def test_custom_timeout_override(mock_session):
 
 
 async def test_get_status_success(mock_session):
-    """Test successful status retrieval."""
+    """Test successful unified status and diagnostics retrieval."""
     mock_session.get.return_value = _make_mock_get(
-        text='{"hu": "off", "hd": "off", "fu": "on", "fd": "off"}'
+        text=_make_status_json(
+            foot={"direction": "up", "source": "web", "remainingMs": 24500}
+        )
     )
 
     client = EspSmartBedApiClient("http://192.168.1.100", mock_session)
     status = await client.async_get_status()
 
     assert isinstance(status, SmartBedState)
-    assert status.hu == "off"
-    assert status.hd == "off"
-    assert status.fu == "on"
-    assert status.fd == "off"
+    assert status.hostname == "esp-smartbed-controller"
+    assert status.version == "2.0.0"
+    assert status.wifi_connected is True
+    assert status.ip == "192.168.178.51"
+    assert status.rssi == -62
+    assert status.uptime_ms == 123456
+    assert status.free_heap == 44800
+    assert status.max_run_duration_ms == 30000
+    assert status.head == SmartBedAxisState(
+        direction="stopped", source="none", remaining_ms=0
+    )
+    assert status.foot == SmartBedAxisState(
+        direction="up", source="web", remaining_ms=24500
+    )
     assert client.is_connected() is True
+
+
+async def test_get_status_forward_compatible_with_extra_keys(mock_session):
+    """Test unknown top-level and axis keys are ignored for forward compatibility."""
+    payload = _make_status_dict(resetReason="PowerOn")
+    payload["head"]["pwm"] = 255
+    mock_session.get.return_value = _make_mock_get(text=json.dumps(payload))
+
+    client = EspSmartBedApiClient("http://192.168.1.100", mock_session)
+    status = await client.async_get_status()
+
+    assert status == _make_expected_state()
 
 
 async def test_get_status_connection_error_and_recovery(mock_session):
@@ -115,22 +177,17 @@ async def test_get_status_connection_error_and_recovery(mock_session):
     assert client.is_connected() is True
 
     # First failed request
-    status = await client.async_get_status()
-    assert status is None
+    assert await client.async_get_status() is None
     assert client.is_connected() is False
 
     # Second failed request (suppresses duplicate warning)
-    status = await client.async_get_status()
-    assert status is None
+    assert await client.async_get_status() is None
     assert client.is_connected() is False
 
     # Recovery
-    mock_session.get.return_value = _make_mock_get(
-        text='{"hu": "off", "hd": "off", "fu": "off", "fd": "off"}'
-    )
-
+    mock_session.get.return_value = _make_mock_get(text=_make_status_json())
     status = await client.async_get_status()
-    assert status is not None
+    assert status == _make_expected_state()
     assert client.is_connected() is True
 
 
@@ -151,11 +208,9 @@ async def test_get_status_timeout_and_recovery(mock_session, caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
 
-    mock_session.get.return_value = _make_mock_get(
-        text='{"hu": "off", "hd": "off", "fu": "off", "fd": "off"}'
-    )
+    mock_session.get.return_value = _make_mock_get(text=_make_status_json())
     status = await client.async_get_status()
-    assert status == SmartBedState(hu="off", hd="off", fu="off", fd="off")
+    assert status == _make_expected_state()
     assert client.is_connected() is True
 
 
@@ -202,21 +257,54 @@ async def test_http_error_status_returns_none_and_logs_error(mock_session, caplo
     assert client.is_connected() is True
 
 
+def _without_key(key: str) -> str:
+    """Return serialized status payload with one top-level key removed."""
+    data = _make_status_dict()
+    del data[key]
+    return json.dumps(data)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         "",
-        '{"hu": "on"',
+        '{"hostname": "esp-smartbed-controller"',
         "OK",
         "<html>502 Bad Gateway</html>",
         "[]",
         "null",
         "42",
-        '{"hu": "on"}',
-        '{"hu": "on", "hd": "off", "fu": "off", "fd": "off", "extra": "on"}',
-        '{"hu": "invalid", "hd": "off", "fu": "off", "fd": "off"}',
-        '{"hu": true, "hd": "off", "fu": "off", "fd": "off"}',
-        '{"hu": null, "hd": "off", "fu": "off", "fd": "off"}',
+        '{"hu": "off", "hd": "off", "fu": "off", "fd": "off"}',
+        _without_key("head"),
+        _without_key("rssi"),
+        _make_status_json(head={"direction": "stopped"}),
+        _make_status_json(head="stopped"),
+        _make_status_json(foot=[]),
+        _make_status_json(
+            head={"direction": "sideways", "source": "none", "remainingMs": 0}
+        ),
+        _make_status_json(
+            head={"direction": True, "source": "none", "remainingMs": 0}
+        ),
+        _make_status_json(
+            foot={"direction": "up", "source": "app", "remainingMs": 1000}
+        ),
+        _make_status_json(rssi=True),
+        _make_status_json(uptimeMs=False),
+        _make_status_json(freeHeap=True),
+        _make_status_json(maxRunDurationMs=True),
+        _make_status_json(
+            head={"direction": "up", "source": "web", "remainingMs": True}
+        ),
+        _make_status_json(uptimeMs=-1),
+        _make_status_json(freeHeap=-1),
+        _make_status_json(maxRunDurationMs=0),
+        _make_status_json(
+            head={"direction": "up", "source": "web", "remainingMs": -1}
+        ),
+        _make_status_json(wifiConnected="true"),
+        _make_status_json(hostname=123),
+        _make_status_json(version=None),
     ],
 )
 async def test_get_status_malformed_payload(mock_session, caplog, payload):
@@ -248,17 +336,18 @@ async def test_malformed_long_payload_truncated_in_log(mock_session, caplog):
 
 
 async def test_set_motor_state(mock_session):
-    """Test setting motor state parses and returns the resulting SmartBedState."""
+    """Test setting motor state parses and returns the unified SmartBedState."""
+    head_up = {"direction": "up", "source": "web", "remainingMs": 30000}
     mock_session.get.return_value = _make_mock_get(
         url="http://192.168.1.100/set?hu=on&hd=off",
-        text='{"hu": "on", "hd": "off", "fu": "off", "fd": "off"}',
+        text=_make_status_json(head=head_up),
     )
 
     client = EspSmartBedApiClient("http://192.168.1.100", mock_session)
     motor = SmartBedMotorState(type=SmartBedMotorType.HEAD, up="on", down="off")
 
     state = await client.async_set_motor_state(motor)
-    assert state == SmartBedState(hu="on", hd="off", fu="off", fd="off")
+    assert state == _make_expected_state(head=head_up)
     mock_session.get.assert_called_with(
         "http://192.168.1.100/set",
         params={"hu": "on", "hd": "off"},
@@ -301,13 +390,13 @@ async def test_stop_all_success(mock_session):
     """Test emergency/full stop hits /stop and returns parsed SmartBedState."""
     mock_session.get.return_value = _make_mock_get(
         url="http://192.168.1.100/stop",
-        text='{"hu": "off", "hd": "off", "fu": "off", "fd": "off"}',
+        text=_make_status_json(),
     )
 
     client = EspSmartBedApiClient("http://192.168.1.100", mock_session)
     state = await client.async_stop_all()
 
-    assert state == SmartBedState(hu="off", hd="off", fu="off", fd="off")
+    assert state == _make_expected_state()
     mock_session.get.assert_called_with(
         "http://192.168.1.100/stop",
         params=None,
@@ -342,14 +431,40 @@ async def test_stop_all_malformed_payload(mock_session, caplog):
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
-@pytest.mark.parametrize("bad_value", ["ON", True, None, "1", 0])
-def test_smartbed_state_validation(bad_value):
-    """Test SmartBedState strictly requires 'on' or 'off' for every channel."""
-    valid = SmartBedState(hu="on", hd="off", fu="off", fd="on")
-    assert valid.hu == "on"
+def test_smartbed_state_validation():
+    """Test SmartBedAxisState and SmartBedState validate inputs and axis lookup."""
+    state = _make_expected_state(
+        head={"direction": "up", "source": "web", "remainingMs": 5000}
+    )
+    assert state.axis(SmartBedMotorType.HEAD) == state.head
+    assert state.axis(SmartBedMotorType.FOOT) == state.foot
 
     with pytest.raises(ValueError):
-        SmartBedState(hu=bad_value, hd="off", fu="off", fd="off")  # type: ignore[arg-type]
+        SmartBedAxisState(direction="invalid", source="none", remaining_ms=0)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        SmartBedAxisState(direction="up", source="invalid", remaining_ms=0)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        SmartBedAxisState(direction="up", source="web", remaining_ms=True)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        SmartBedAxisState(direction="up", source="web", remaining_ms=-5)
+
+    with pytest.raises(ValueError):
+        SmartBedState(
+            hostname="esp-smartbed-controller",
+            version="2.0.0",
+            build="Nov 20 2026 22:00:00",
+            wifi_connected=True,
+            ip="192.168.178.51",
+            rssi=True,  # type: ignore[arg-type]
+            uptime_ms=1000,
+            free_heap=44800,
+            max_run_duration_ms=30000,
+            head=state.head,
+            foot=state.foot,
+        )
 
 
 async def test_test_connection(mock_session):
