@@ -18,11 +18,10 @@ from homeassistant.const import (
 from homeassistant.core import State
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from custom_components.smartbed import async_setup
 from custom_components.smartbed.const import (
-    CONF_API,
     CONF_BASE_URL,
-    CONF_COORDINATOR,
-    CONF_MOTOR_TYPE,
+    DATA_ENTRIES,
     DOMAIN,
 )
 from custom_components.smartbed.cover import (
@@ -30,11 +29,51 @@ from custom_components.smartbed.cover import (
     SmartBedMotor,
     async_setup_platform,
 )
+from custom_components.smartbed.entity import SmartBedRuntimeData, clean_base_url
 from custom_components.smartbed.models import (
+    ControlSource,
+    MotorDirection,
+    SmartBedAxisState,
     SmartBedMotorState,
     SmartBedMotorType,
     SmartBedState,
 )
+
+
+def _make_axis(
+    direction: MotorDirection = "stopped",
+    source: ControlSource = "none",
+    remaining_ms: int = 0,
+) -> SmartBedAxisState:
+    """Create a SmartBedAxisState for cover tests."""
+    return SmartBedAxisState(
+        direction=direction, source=source, remaining_ms=remaining_ms
+    )
+
+
+def _make_state(
+    head: SmartBedAxisState | None = None,
+    foot: SmartBedAxisState | None = None,
+    *,
+    version: str = "2.0.0",
+    rssi: int = -62,
+    uptime_ms: int = 123456,
+    free_heap: int = 44800,
+) -> SmartBedState:
+    """Create a unified SmartBedState for cover tests."""
+    return SmartBedState(
+        hostname="esp-smartbed-controller",
+        version=version,
+        build="Nov 20 2026 22:00:00",
+        wifi_connected=True,
+        ip="192.168.178.51",
+        rssi=rssi,
+        uptime_ms=uptime_ms,
+        free_heap=free_heap,
+        max_run_duration_ms=30000,
+        head=head if head is not None else _make_axis(),
+        foot=foot if foot is not None else _make_axis(),
+    )
 
 
 def create_motor(
@@ -53,14 +92,14 @@ def create_motor(
         coordinator.last_update_success = True
         coordinator.data = None
 
-    config = {
-        CONF_NAME: f"SmartBed {motor_type.name.capitalize()} Motor",
-        CONF_BASE_URL: base_url,
-        CONF_API: mock_api,
-        CONF_COORDINATOR: coordinator,
-        CONF_MOTOR_TYPE: motor_type,
-    }
-    return SmartBedMotor(config)
+    runtime_data = SmartBedRuntimeData(
+        name="SmartBed",
+        base_url=base_url,
+        clean_url=clean_base_url(base_url),
+        api=mock_api,
+        coordinator=coordinator,
+    )
+    return SmartBedMotor(runtime_data, motor_type)
 
 
 def create_coordinator_and_motors(
@@ -76,8 +115,15 @@ def create_coordinator_and_motors(
         update_method=mock_api.async_get_status,
         update_interval=SCAN_INTERVAL,
     )
-    head_motor = create_motor(SmartBedMotorType.HEAD, mock_api, coordinator)
-    foot_motor = create_motor(SmartBedMotorType.FOOT, mock_api, coordinator)
+    runtime_data = SmartBedRuntimeData(
+        name="SmartBed",
+        base_url="http://esp-smartbed-controller.local",
+        clean_url="esp-smartbed-controller.local",
+        api=mock_api,
+        coordinator=coordinator,
+    )
+    head_motor = SmartBedMotor(runtime_data, SmartBedMotorType.HEAD)
+    foot_motor = SmartBedMotor(runtime_data, SmartBedMotorType.FOOT)
     for motor in (head_motor, foot_motor):
         motor.hass = hass
         motor.async_write_ha_state = MagicMock()
@@ -99,18 +145,26 @@ def test_motor_initial_state():
     assert motor.is_closed is True
     assert motor.is_opening is False
     assert motor.is_closing is False
+    assert motor.extra_state_attributes == {}
+    assert motor.device_info["sw_version"] is None
     assert motor.available is True
     assert motor.unique_id == f"{DOMAIN}_esp-smartbed-controller.local_h"
 
 
 def test_device_info_groups_both_motors_under_single_device():
     """Test both motors share the same device_info identifier while keeping unique_ids distinct."""
+    coordinator = MagicMock(spec=DataUpdateCoordinator)
+    coordinator.last_update_success = True
+    coordinator.data = _make_state(version="2.0.0")
+
     head_motor = create_motor(
         SmartBedMotorType.HEAD,
+        coordinator=coordinator,
         base_url="http://esp-smartbed-controller.local",
     )
     foot_motor = create_motor(
         SmartBedMotorType.FOOT,
+        coordinator=coordinator,
         base_url="https://esp-smartbed-controller.local/",
     )
 
@@ -123,6 +177,12 @@ def test_device_info_groups_both_motors_under_single_device():
     assert foot_motor.device_info["identifiers"] == expected_identifiers
     assert head_motor.device_info["name"] == "SmartBed"
     assert foot_motor.device_info["name"] == "SmartBed"
+    assert head_motor.device_info["sw_version"] == "2.0.0"
+    assert foot_motor.device_info["sw_version"] == "2.0.0"
+    assert (
+        head_motor.device_info["configuration_url"]
+        == "http://esp-smartbed-controller.local"
+    )
 
 
 async def test_motor_state_restoration():
@@ -153,10 +213,12 @@ async def test_motor_state_restoration():
 
 
 async def test_motor_open_action(hass):
-    """Test async_open_cover calls API and syncs both motors via coordinator."""
+    """Test async_open_cover calls API and syncs both motors and attributes via coordinator."""
     mock_api = MagicMock()
     mock_api.is_connected.return_value = True
-    response_state = SmartBedState(hu="on", hd="off", fu="off", fd="off")
+    response_state = _make_state(
+        head=_make_axis(direction="up", source="web", remaining_ms=30000)
+    )
     mock_api.async_set_motor_state = AsyncMock(return_value=response_state)
 
     coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
@@ -175,8 +237,16 @@ async def test_motor_open_action(hass):
         assert head_motor.is_closed is False
         assert head_motor.is_opening is True
         assert head_motor.is_closing is False
+        assert head_motor.extra_state_attributes == {
+            "source": "web",
+            "remaining_ms": 30000,
+        }
         assert foot_motor.is_closed is True
         assert foot_motor.is_opening is False
+        assert foot_motor.extra_state_attributes == {
+            "source": "none",
+            "remaining_ms": 0,
+        }
         assert head_motor.async_write_ha_state.called
         assert foot_motor.async_write_ha_state.called
     finally:
@@ -187,7 +257,9 @@ async def test_motor_close_action(hass):
     """Test async_close_cover calls API and syncs state via coordinator."""
     mock_api = MagicMock()
     mock_api.is_connected.return_value = True
-    response_state = SmartBedState(hu="off", hd="on", fu="off", fd="off")
+    response_state = _make_state(
+        head=_make_axis(direction="down", source="web", remaining_ms=14000)
+    )
     mock_api.async_set_motor_state = AsyncMock(return_value=response_state)
 
     coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
@@ -206,6 +278,10 @@ async def test_motor_close_action(hass):
         assert head_motor.is_closed is True
         assert head_motor.is_closing is True
         assert head_motor.is_opening is False
+        assert head_motor.extra_state_attributes == {
+            "source": "web",
+            "remaining_ms": 14000,
+        }
         assert head_motor.async_write_ha_state.called
         assert foot_motor.async_write_ha_state.called
     finally:
@@ -216,7 +292,10 @@ async def test_motor_stop_action(hass):
     """Test async_stop_cover stops only the target motor and preserves other axis state."""
     mock_api = MagicMock()
     mock_api.is_connected.return_value = True
-    response_state = SmartBedState(hu="off", hd="off", fu="on", fd="off")
+    response_state = _make_state(
+        head=_make_axis(direction="stopped", source="none", remaining_ms=0),
+        foot=_make_axis(direction="up", source="web", remaining_ms=24500),
+    )
     mock_api.async_set_motor_state = AsyncMock(return_value=response_state)
 
     coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
@@ -224,7 +303,9 @@ async def test_motor_stop_action(hass):
         await head_motor.async_added_to_hass()
         await foot_motor.async_added_to_hass()
         head_motor._is_closed = False
-        head_motor._motor_state.up = "on"
+        head_motor._axis_state = _make_axis(
+            direction="up", source="web", remaining_ms=10000
+        )
         head_motor.async_write_ha_state.reset_mock()
         foot_motor.async_write_ha_state.reset_mock()
 
@@ -236,8 +317,16 @@ async def test_motor_stop_action(hass):
         assert head_motor.is_opening is False
         assert head_motor.is_closing is False
         assert head_motor.is_closed is False
+        assert head_motor.extra_state_attributes == {
+            "source": "none",
+            "remaining_ms": 0,
+        }
         assert foot_motor.is_opening is True
         assert foot_motor.is_closed is False
+        assert foot_motor.extra_state_attributes == {
+            "source": "web",
+            "remaining_ms": 24500,
+        }
         assert head_motor.async_write_ha_state.called
         assert foot_motor.async_write_ha_state.called
     finally:
@@ -248,7 +337,9 @@ async def test_motor_command_reflects_wired_remote_override(hass):
     """Test cover reflects authoritative ESP state when wired remote overrides a web command."""
     mock_api = MagicMock()
     mock_api.is_connected.return_value = True
-    override_state = SmartBedState(hu="off", hd="on", fu="off", fd="off")
+    override_state = _make_state(
+        head=_make_axis(direction="down", source="remote", remaining_ms=29500)
+    )
     mock_api.async_set_motor_state = AsyncMock(return_value=override_state)
 
     coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
@@ -261,6 +352,10 @@ async def test_motor_command_reflects_wired_remote_override(hass):
         assert head_motor.is_opening is False
         assert head_motor.is_closing is True
         assert head_motor.is_closed is True
+        assert head_motor.extra_state_attributes == {
+            "source": "remote",
+            "remaining_ms": 29500,
+        }
     finally:
         await coordinator.async_shutdown()
 
@@ -322,7 +417,10 @@ async def test_motor_polling_update_head_and_foot(hass):
     mock_api = MagicMock()
     mock_api.is_connected.return_value = True
     mock_api.async_get_status = AsyncMock(
-        return_value=SmartBedState(hu="on", hd="off", fu="off", fd="on")
+        return_value=_make_state(
+            head=_make_axis(direction="up", source="web", remaining_ms=12000),
+            foot=_make_axis(direction="down", source="remote", remaining_ms=25000),
+        )
     )
 
     coordinator, head_motor, foot_motor = create_coordinator_and_motors(hass, mock_api)
@@ -337,21 +435,31 @@ async def test_motor_polling_update_head_and_foot(hass):
 
         assert head_motor.is_opening is True
         assert head_motor.is_closed is False
+        assert head_motor.extra_state_attributes == {
+            "source": "web",
+            "remaining_ms": 12000,
+        }
         assert head_motor.available is True
 
         assert foot_motor.is_closing is True
         assert foot_motor.is_closed is True
+        assert foot_motor.extra_state_attributes == {
+            "source": "remote",
+            "remaining_ms": 25000,
+        }
         assert foot_motor.available is True
 
         # 2. Both resting / flat
-        mock_api.async_get_status.return_value = SmartBedState(
-            hu="off", hd="off", fu="off", fd="off"
-        )
+        mock_api.async_get_status.return_value = _make_state()
         await coordinator.async_refresh()
         assert mock_api.async_get_status.await_count == 2
 
         assert head_motor.is_opening is False
         assert head_motor.is_closing is False
+        assert head_motor.extra_state_attributes == {
+            "source": "none",
+            "remaining_ms": 0,
+        }
         assert foot_motor.is_opening is False
         assert foot_motor.is_closing is False
 
@@ -366,31 +474,41 @@ async def test_motor_polling_update_head_and_foot(hass):
 
 
 async def test_setup_platform(hass):
-    """Test async_setup_platform instantiates Head and Foot entities with shared coordinator."""
+    """Test async_setup_platform instantiates Head/Foot entities and stores runtime data."""
+    assert await async_setup(hass, {}) is True
+
     add_entities = MagicMock()
     config = {
         CONF_NAME: "SmartBed",
         CONF_BASE_URL: "http://esp-smartbed-controller.local",
     }
     await async_setup_platform(hass, config, add_entities)
+    await hass.async_block_till_done()
 
     assert add_entities.called
     entities = add_entities.call_args[0][0]
     assert len(entities) == 2
 
     head_motor, foot_motor = entities
-    assert head_motor.name == "SmartBed Head Motor"
-    assert foot_motor.name == "SmartBed Foot Motor"
-    assert head_motor.should_poll is False
-    assert foot_motor.should_poll is False
-    assert head_motor.coordinator is foot_motor.coordinator
-    assert head_motor._api is foot_motor._api
-    assert head_motor.coordinator.update_interval == timedelta(seconds=10)
-    assert head_motor.device_info["identifiers"] == foot_motor.device_info["identifiers"]
-    assert head_motor.device_info["identifiers"] == {
-        (DOMAIN, "esp-smartbed-controller.local")
-    }
-    await head_motor.coordinator.async_shutdown()
+    try:
+        assert head_motor.name == "SmartBed Head Motor"
+        assert foot_motor.name == "SmartBed Foot Motor"
+        assert head_motor.should_poll is False
+        assert foot_motor.should_poll is False
+        assert head_motor.coordinator is foot_motor.coordinator
+        assert head_motor._api is foot_motor._api
+        assert head_motor.coordinator.update_interval == timedelta(seconds=10)
+        assert (
+            head_motor.device_info["identifiers"]
+            == foot_motor.device_info["identifiers"]
+        )
+        assert head_motor.device_info["identifiers"] == {
+            (DOMAIN, "esp-smartbed-controller.local")
+        }
+        runtime_data = hass.data[DOMAIN][DATA_ENTRIES]["esp-smartbed-controller.local"]
+        assert runtime_data.coordinator is head_motor.coordinator
+    finally:
+        await head_motor.coordinator.async_shutdown()
 
     # Verify custom scan_interval in YAML config is respected
     custom_add_entities = MagicMock()
@@ -400,6 +518,9 @@ async def test_setup_platform(hass):
         CONF_SCAN_INTERVAL: timedelta(seconds=20),
     }
     await async_setup_platform(hass, custom_config, custom_add_entities)
+    await hass.async_block_till_done()
     custom_entities = custom_add_entities.call_args[0][0]
-    assert custom_entities[0].coordinator.update_interval == timedelta(seconds=20)
-    await custom_entities[0].coordinator.async_shutdown()
+    try:
+        assert custom_entities[0].coordinator.update_interval == timedelta(seconds=20)
+    finally:
+        await custom_entities[0].coordinator.async_shutdown()
